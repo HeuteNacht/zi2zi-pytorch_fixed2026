@@ -221,7 +221,7 @@ class Zi2ZiModel:
                 if self.gpu_ids and torch.cuda.is_available():
                     # torch.save(net.cpu().state_dict(), save_path)
                     torch.save(net.state_dict(), save_path)
-                    net.cuda(self.gpu_ids[0])
+                    net.to(f"cuda:{self.gpu_ids[0]}")
                 else:
                     torch.save(net.cpu().state_dict(), save_path)
 

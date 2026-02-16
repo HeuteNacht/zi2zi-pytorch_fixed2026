@@ -1,113 +1,61 @@
-from os import listdir
-from os.path import join
-import random
-
-from PIL import Image, ImageFilter
-import torch
 import torch.utils.data as data
-import torchvision.transforms as transforms
-
+import os
+import pickle
 import numpy as np
-
-from utils.image_processing import read_split_image
-from utils.bytesIO import PickledImageProvider, bytes_to_file
-
+from PIL import Image
+import io
+import torch
 
 class DatasetFromObj(data.Dataset):
-    def __init__(self, obj_path, input_nc=3, augment=False, bold=False, rotate=False, blur=False, start_from=0):
+    def __init__(self, obj_path, resize_to=256, start_from=0, input_nc=3, **kwargs):
         super(DatasetFromObj, self).__init__()
-        self.image_provider = PickledImageProvider(obj_path)
-        self.input_nc = input_nc
-        if self.input_nc == 1:
-            self.transform = transforms.Normalize(0.5, 0.5)
-        elif self.input_nc == 3:
-            self.transform = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        else:
-            raise ValueError('input_nc should be 1 or 3')
-        self.augment = augment
-        self.bold = bold
-        self.rotate = rotate
-        self.blur = blur
+        self.obj_path = obj_path
         self.start_from = start_from
-
-    def __getitem__(self, index):
-        item = self.image_provider.examples[index]
-        img_A, img_B = self.process(item[1])
-        return item[0] - self.start_from, img_A, img_B
+        self.resize_to = resize_to
+        if not os.path.exists(obj_path):
+            raise Exception(f"数据文件不存在: {obj_path}")
+        with open(obj_path, 'rb') as f:
+            self.dataset = pickle.load(f)
+        if isinstance(self.dataset, dict):
+            self.dataset = list(self.dataset.values())
+        print(f"✅ 数据加载成功，总样本数: {len(self.dataset)}")
 
     def __len__(self):
-        return len(self.image_provider.examples)
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        item = self.dataset[index]
+        # 拆解 Label (防止嵌套 tuple)
+        label = item[0]
+        while isinstance(label, (tuple, list)): 
+            label = label[0]
+        # 拆解图片 Bytes
+        img_bytes = item[1]
+        while isinstance(img_bytes, (tuple, list)): 
+            img_bytes = img_bytes[0]
+        
+        img_A, img_B = self.process(img_bytes)
+        final_label = int(label) - self.start_from
+        return final_label, img_A, img_B
 
     def process(self, img_bytes):
-        """
-            process byte stream to training data entry
-        """
-        image_file = bytes_to_file(img_bytes)
-        img = Image.open(image_file)
         try:
-            img_A, img_B = read_split_image(img)
-            if self.augment:
-                # augment the image by:
-                # 1) enlarge the image
-                # 2) random crop the image back to its original size
-                # NOTE: image A and B needs to be in sync as how much
-                # to be shifted
-                w, h = img_A.size
-                if self.bold:
-                    multiplier = random.uniform(1.0, 1.2)
-                else:
-                    multiplier = random.uniform(1.0, 1.05)
-                # add an eps to prevent cropping issue
-                nw = int(multiplier * w) + 1
-                nh = int(multiplier * h) + 1
+            img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        except Exception as e:
+            print(f"图片读取错误: {e}")
+            dummy = torch.zeros(3, self.resize_to, self.resize_to)
+            return dummy, dummy
+        
+        w, h = img.size
+        img_A = img.crop((0, 0, w//2, h))
+        img_B = img.crop((w//2, 0, w, h))
+        # 适配 Pillow LANCZOS
+        img_A = img_A.resize((self.resize_to, self.resize_to), Image.LANCZOS)
+        img_B = img_B.resize((self.resize_to, self.resize_to), Image.LANCZOS)
+        return self.transform(img_A), self.transform(img_B)
 
-                # Used to use Image.BICUBIC, change to ANTIALIAS, get better image.
-                img_A = img_A.resize((nw, nh), Image.ANTIALIAS)
-                img_B = img_B.resize((nw, nh), Image.ANTIALIAS)
-
-                shift_x = random.randint(0, max(nw - w - 1, 0))
-                shift_y = random.randint(0, max(nh - h - 1, 0))
-
-                img_A = img_A.crop((shift_x, shift_y, shift_x + w, shift_y + h))
-                img_B = img_B.crop((shift_x, shift_y, shift_x + w, shift_y + h))
-
-                if self.rotate and random.random() > 0.9:
-                    angle_list = [0, 180]
-                    random_angle = random.choice(angle_list)
-                    if self.input_nc == 3:
-                        fill_color = (255, 255, 255)
-                    else:
-                        fill_color = 255
-                    img_A = img_A.rotate(random_angle, resample=Image.BILINEAR, fillcolor=fill_color)
-                    img_B = img_B.rotate(random_angle, resample=Image.BILINEAR, fillcolor=fill_color)
-
-                if self.blur and random.random() > 0.8:
-                    sigma_list = [1, 1.5, 2]
-                    sigma = random.choice(sigma_list)
-                    img_A = img_A.filter(ImageFilter.GaussianBlur(radius=sigma))
-                    img_B = img_B.filter(ImageFilter.GaussianBlur(radius=sigma))
-
-                img_A = transforms.ToTensor()(img_A)
-                img_B = transforms.ToTensor()(img_B)
-
-                '''
-                Used to resize here. Change it before rotate and blur.
-                w_offset = random.randint(0, max(0, nh - h - 1))
-                h_offset = random.randint(0, max(0, nh - h - 1))
-
-                img_A = img_A[:, h_offset: h_offset + h, w_offset: w_offset + h]
-                img_B = img_B[:, h_offset: h_offset + h, w_offset: w_offset + h]
-                '''
-
-                img_A = self.transform(img_A)
-                img_B = self.transform(img_B)
-            else:
-                img_A = transforms.ToTensor()(img_A)
-                img_B = transforms.ToTensor()(img_B)
-                img_A = self.transform(img_A)
-                img_B = self.transform(img_B)
-
-            return img_A, img_B
-
-        finally:
-            image_file.close()
+    def transform(self, img):
+        img = np.array(img, dtype=np.float32)
+        img = img.transpose((2, 0, 1))
+        img = (img / 127.5) - 1.0
+        return torch.from_numpy(img)
