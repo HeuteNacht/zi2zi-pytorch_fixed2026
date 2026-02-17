@@ -40,6 +40,7 @@ class Zi2ZiModel:
         self.image_size = image_size
 
     def setup(self):
+        self.device = torch.device(f"cuda:{self.gpu_ids[0]}" if (self.gpu_ids and str(self.gpu_ids[0]) != "-1") else "cpu")
 
         self.netG = UNetGenerator(
             input_nc=self.input_nc,
@@ -86,9 +87,9 @@ class Zi2ZiModel:
 
     def set_input(self, labels, real_A, real_B):
         if self.gpu_ids:
-            self.real_A = real_A.to(self.gpu_ids[0])
-            self.real_B = real_B.to(self.gpu_ids[0])
-            self.labels = labels.to(self.gpu_ids[0])
+            self.real_A = real_A.to(self.device)
+            self.real_B = real_B.to(self.device)
+            self.labels = labels.to(self.device)
         else:
             self.real_A = real_A
             self.real_B = real_B
